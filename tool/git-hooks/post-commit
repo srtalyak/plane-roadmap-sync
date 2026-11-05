@@ -1,0 +1,23 @@
+#!/bin/sh
+# ROADMAP.md -> Plane after any commit that touched ROADMAP.md (README.md).
+# States, cycles and descriptions of keyed lines only; a new item is created by a deliberate
+# `dart run tool/plane_sync.dart apply` on the default branch, which also writes the line's key.
+# Never blocks a commit. Installed once per clone: `git config core.hooksPath tool/git-hooks`.
+# A worktree shares it and mirrors the main clone's ROADMAP.md, where the token
+# (`secrets/plane.env`) lives.
+# `dart` comes from PATH, which may be older than the project's SDK: `dart run` would resolve the
+# pubspec, and the package's language version is refused as too high. The tool needs nothing but
+# dart:io and dart:convert, so it runs directly on an empty package config.
+git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null | grep -qx ROADMAP.md || exit 0
+tool="$(pwd)/tool/plane_sync.dart"
+main="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+main="${main%/.git}"
+[ -f "$main/secrets/plane.env" ] || exit 0
+# Git points these at the committing checkout; the tool must see the main clone's HEAD.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+cd "$main" || exit 0
+echo "plane_sync: mirroring ROADMAP.md to Plane (keyed lines; log in secrets/plane-sync.log)"
+printf '{"configVersion":2,"packages":[]}' > secrets/plane-sync-packages.json
+dart --packages=secrets/plane-sync-packages.json "$tool" apply --no-create >> secrets/plane-sync.log 2>&1 \
+  || echo "plane_sync: failed - see secrets/plane-sync.log"
+exit 0

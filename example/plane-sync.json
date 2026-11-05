@@ -1,0 +1,28 @@
+{
+  "planeUrl": "https://plane.example.com",
+  "workspace": "my-workspace",
+  "projectId": "00000000-0000-0000-0000-000000000000",
+  "identifier": "DEMO",
+  "repoUrl": "https://github.com/your-name/your-repo",
+  "defaultBranch": "main",
+  "cycles": [
+    { "name": "Phase 0", "start": "2030-01-01", "end": "2030-01-31", "description": "Day 0: before any feature code" },
+    { "name": "Phase 1", "start": "2030-02-01", "end": "2030-03-31", "description": "First playable" },
+    { "name": "Phase 2", "start": "2030-04-01", "end": "2030-06-30", "description": "MVP" },
+    { "name": "Phase 3", "start": "2030-07-01", "end": "2030-08-31", "description": "The soft launch" },
+    { "name": "Phase 4", "start": "2030-09-01", "end": "2030-12-31", "description": "Scale" }
+  ],
+  "modules": ["Core", "Backend", "Ops", "Launch"],
+  "labels": { "gate": "#f59e0b" },
+  "phaseModules": {
+    "Phase 0": "Ops",
+    "Phase 1": "Core",
+    "Phase 3": "Launch",
+    "Phase 4": "Launch"
+  },
+  "boxModules": {
+    "P0-G": "Backend",
+    "P2-17": "Launch",
+    "G2": "Launch"
+  }
+}
