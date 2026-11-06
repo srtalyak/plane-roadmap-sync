@@ -416,6 +416,49 @@ void main() {
     });
   });
 
+  group('a real worktree', () {
+    late _Clone clone;
+    setUp(() => clone = _Clone());
+    tearDown(() => clone.dispose());
+
+    test('reaches the token in the main clone, with no copy of its own', () async {
+      clone.writeToken();
+      final worktree = clone.addWorktree();
+      final main = await findMainClone(worktree);
+      // A boolean on purpose: a failure here must never print what it read.
+      expect(await readKey(File('$main/$keyFile')) == 'fake', isTrue);
+      expect(File('$worktree/$keyFile').existsSync(), isFalse);
+    });
+
+    test('holds the branch when it is in its history', () async {
+      clone.git(['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+      final worktree = clone.addWorktree();
+      expect(await holdsRemoteBranch('main', worktree), isTrue);
+      clone.gitIn(worktree, ['commit', '--allow-empty', '-m', 'a tick']);
+      expect(await holdsRemoteBranch('main', worktree), isTrue);
+    });
+
+    test('a checkout behind the branch does not hold it', () async {
+      final behind = clone.addWorktree();
+      clone.git(['commit', '--allow-empty', '-m', 'main moved']);
+      clone.git(['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+      expect(await holdsRemoteBranch('main', behind), isFalse);
+    });
+
+    test('asks about the named branch, not main', () async {
+      final behind = clone.addWorktree();
+      clone.git(['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+      clone.git(['commit', '--allow-empty', '-m', 'develop moved']);
+      clone.git(['update-ref', 'refs/remotes/origin/develop', 'HEAD']);
+      expect(await holdsRemoteBranch('main', behind), isTrue);
+      expect(await holdsRemoteBranch('develop', behind), isFalse);
+    });
+
+    test('no such ref holds nothing', () async {
+      expect(await holdsRemoteBranch('main', clone.path), isFalse);
+    });
+  });
+
   group('the sync', () {
     late Directory dir;
     late File roadmap;
@@ -436,15 +479,18 @@ void main() {
       bool apply = false,
       bool noCreate = false,
       String branch = 'main',
+      bool holdsDefault = true,
+      Config? config,
     }) {
       roadmap.writeAsStringSync(text);
       return runSync(
-        config: demo,
+        config: config ?? demo,
         api: plane,
         roadmap: roadmap,
         cache: cache,
         sha: 'abcdef0123456789',
         branch: branch,
+        holdsDefault: holdsDefault,
         apply: apply,
         noCreate: noCreate,
         now: _now,
@@ -481,11 +527,56 @@ void main() {
       expect(out.toString(), contains('pending: 0 change(s)'));
     });
 
-    test('apply off the default branch is refused before any call', () async {
+    test('apply behind the remote default branch is refused before any call, on it too', () async {
       final plane = FakePlane();
-      await expectLater(run(plane, two, apply: true, branch: 'feature/x'), throwsStateError);
-      await expectLater(run(plane, two, apply: true, noCreate: true, branch: 'HEAD'), throwsStateError);
+      for (final branch in ['main', 'feature/x', 'HEAD']) {
+        for (final noCreate in [true, false]) {
+          await expectLater(
+            run(plane, two, apply: true, noCreate: noCreate, branch: branch, holdsDefault: false),
+            throwsStateError,
+          );
+        }
+      }
       expect(plane.writes, isEmpty);
+    });
+
+    test('check behind the remote default branch still reads', () async {
+      expect(await run(FakePlane(), two, holdsDefault: false), 1);
+    });
+
+    test('a checkout holding the default branch mirrors keyed lines off it', () async {
+      final plane = FakePlane(issues: [
+        {'id': 'i1', 'sequence_id': 1, 'name': 'x', 'state': 'state-Todo'},
+      ]);
+      plane.cycleOf['i1'] = 'cycle-1';
+      cache.writeAsStringSync(jsonEncode({'DEMO-1': '**P1-01 ONE**'}));
+      const ticked = '## Phase 1\n- [x] **P1-01 ONE** <!-- DEMO-1 -->\n';
+      expect(await run(plane, ticked, apply: true, noCreate: true, branch: 'HEAD'), 0);
+      expect(plane.writes, ['PATCH /issues/i1/']);
+    });
+
+    test('a creating apply stays on the default branch, whatever the checkout holds', () async {
+      final plane = FakePlane();
+      await expectLater(run(plane, two, apply: true, branch: 'HEAD'), throwsStateError);
+      await expectLater(run(plane, two, apply: true, branch: 'feature/x'), throwsStateError);
+      expect(plane.writes, isEmpty);
+    });
+
+    test('the guards follow the configured default branch', () async {
+      final raw = jsonDecode(File('example/plane-sync.json').readAsStringSync()) as Map;
+      final develop = Config.parse(jsonEncode({...raw, 'defaultBranch': 'develop'}));
+      final plane = FakePlane();
+      await expectLater(
+        run(plane, two, apply: true, branch: 'main', config: develop),
+        throwsA(predicate((e) => '$e'.contains('runs on develop'))),
+      );
+      await expectLater(
+        run(plane, two, apply: true, branch: 'develop', holdsDefault: false, config: develop),
+        throwsA(predicate((e) => '$e'.contains('origin/develop'))),
+      );
+      expect(plane.writes, isEmpty);
+      expect(await run(plane, two, apply: true, branch: 'develop', config: develop), 0);
+      expect(plane.writes, isNotEmpty);
     });
 
     test('check is allowed on any branch', () async {
@@ -543,6 +634,7 @@ void main() {
           cache: cache,
           sha: 'abcdef0123456789',
           branch: 'main',
+          holdsDefault: true,
           apply: true,
           noCreate: false,
           now: _now,
@@ -836,7 +928,7 @@ void main() {
       expect(code, contains('"packages":[]'));
     });
 
-    test('clears the git environment before leaving the worktree', () {
+    test('clears the git environment before the tool calls git', () {
       expect(hook, contains('unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE'));
     });
 
@@ -848,7 +940,144 @@ void main() {
     test('never blocks a commit', () {
       expect(hook.trimRight(), endsWith('exit 0'));
     });
+
+    group('on a real commit', () {
+      late _Clone clone;
+      late String worktree;
+      setUp(() {
+        clone = _Clone()..installHook();
+        worktree = clone.addWorktree();
+      });
+      tearDown(() => clone.dispose());
+
+      test('mirrors the committing worktree, not the main clone', () {
+        clone.writeToken();
+        expect(clone.tick(worktree).exitCode, 0);
+        final call = clone.dartCall!;
+        expect(call, contains('apply --no-create'));
+        expect(call, contains('- [x] **P0-X**'), reason: 'the main clone still holds the open line');
+        expect(clone.log, contains('fake dart ran'));
+      });
+
+      test('still mirrors a commit in the main clone', () {
+        clone.writeToken();
+        expect(clone.tick(clone.path).exitCode, 0);
+        expect(clone.dartCall, contains('- [x] **P0-X**'));
+      });
+
+      test('leaves no secrets in the worktree', () {
+        clone.writeToken();
+        clone.tick(worktree);
+        expect(Directory('$worktree/secrets').existsSync(), isFalse);
+      });
+
+      test('does nothing without the token file, and the commit stands', () {
+        Directory('${clone.path}/secrets').createSync();
+        final before = clone.gitIn(worktree, ['rev-parse', 'HEAD']).stdout;
+        expect(clone.tick(worktree).exitCode, 0);
+        expect(clone.dartCall, isNull);
+        expect(clone.gitIn(worktree, ['rev-parse', 'HEAD']).stdout, isNot(before));
+      });
+
+      test('a failing tool is reported, names the real log, and the commit stands', () {
+        clone.writeToken();
+        final before = clone.gitIn(worktree, ['rev-parse', 'HEAD']).stdout;
+        final commit = clone.tick(worktree, dartExit: 2);
+        expect(commit.exitCode, 0);
+        expect('${commit.stdout}${commit.stderr}', contains('failed - see ${clone.path}/secrets/plane-sync.log'));
+        expect(clone.gitIn(worktree, ['rev-parse', 'HEAD']).stdout, isNot(before));
+      });
+
+      test('ignores a commit that leaves ROADMAP.md alone', () {
+        clone.writeToken();
+        File('$worktree/other.txt').writeAsStringSync('x');
+        clone.gitIn(worktree, ['add', 'other.txt']);
+        expect(clone.commit(worktree, 'not a tick').exitCode, 0);
+        expect(clone.dartCall, isNull);
+      });
+    });
   });
+}
+
+/// A throwaway clone with one open box, its worktrees beside it, and a `dart`
+/// on PATH that records its call: nothing here can reach Plane.
+class _Clone {
+  _Clone() : _root = Directory.systemTemp.createTempSync('plane_hook_test') {
+    Directory(path).createSync();
+    git(['init', '-q', '-b', 'main']);
+    git(['config', 'user.name', 'test']);
+    git(['config', 'user.email', 'test@example.com']);
+    git(['config', 'commit.gpgsign', 'false']);
+    File('$path/ROADMAP.md').writeAsStringSync('- [ ] **P0-X**\n');
+    git(['add', 'ROADMAP.md']);
+    git(['commit', '-q', '-m', 'first']);
+    final dart = File('$_bin/dart')
+      ..createSync(recursive: true)
+      ..writeAsStringSync(
+        '#!/bin/sh\n'
+        'echo "\$*" > "\$FAKE_DART_CALL"\n'
+        'cat ROADMAP.md >> "\$FAKE_DART_CALL"\n'
+        'echo fake dart ran\n'
+        'exit "\${FAKE_DART_EXIT:-0}"\n',
+      );
+    if (!Platform.isWindows) Process.runSync('chmod', ['+x', dart.path]);
+  }
+
+  final Directory _root;
+  int _worktrees = 0;
+
+  String get _base => _root.path.replaceAll(r'\', '/');
+  String get path => '$_base/clone';
+  String get _bin => '$_base/bin';
+  File get _call => File('$_base/dart-call.txt');
+
+  String? get dartCall => _call.existsSync() ? _call.readAsStringSync() : null;
+  String get log => File('$path/secrets/plane-sync.log').readAsStringSync();
+
+  ProcessResult gitIn(String dir, List<String> args, {int dartExit = 0}) => Process.runSync(
+        'git',
+        args,
+        workingDirectory: dir,
+        environment: {
+          'PATH': '$_bin${Platform.isWindows ? ';' : ':'}${Platform.environment['PATH']}',
+          'FAKE_DART_CALL': _call.path,
+          'FAKE_DART_EXIT': '$dartExit',
+        },
+      );
+
+  ProcessResult git(List<String> args) {
+    final r = gitIn(path, args);
+    if (r.exitCode != 0) throw StateError('git ${args.join(' ')}: ${r.stderr}');
+    return r;
+  }
+
+  void installHook() {
+    git(['config', 'core.hooksPath', '${Directory.current.path}/tool/git-hooks'.replaceAll(r'\', '/')]);
+  }
+
+  void writeToken() {
+    File('$path/$keyFile')
+      ..createSync(recursive: true)
+      ..writeAsStringSync('PLANE_API_KEY=fake\n');
+  }
+
+  /// Detached at HEAD, as a tick from a worktree is.
+  String addWorktree() {
+    final dir = '$_base/worktree${_worktrees++}';
+    git(['worktree', 'add', '-q', '--detach', dir, 'HEAD']);
+    return dir;
+  }
+
+  ProcessResult commit(String dir, String message, {int dartExit = 0}) =>
+      gitIn(dir, ['commit', '-q', '-m', message], dartExit: dartExit);
+
+  ProcessResult tick(String dir, {int dartExit = 0}) {
+    File('$dir/ROADMAP.md').writeAsStringSync('- [x] **P0-X**\n');
+    gitIn(dir, ['add', 'ROADMAP.md']);
+    return commit(dir, 'tick', dartExit: dartExit);
+  }
+
+  void dispose() => _root.deleteSync(recursive: true);
 }
 
 class _Crash implements Exception {}

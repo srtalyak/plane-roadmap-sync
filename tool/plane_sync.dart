@@ -8,8 +8,8 @@
 // them again. It deletes nothing, ever.
 //
 //   dart run tool/plane_sync.dart check              # dry run (exit 1 if out of sync)
-//   dart run tool/plane_sync.dart apply              # default branch: write to Plane, write new keys
-//   dart run tool/plane_sync.dart apply --no-create  # default branch: keyed lines only (the git hook)
+//   dart run tool/plane_sync.dart apply              # up-to-date default branch: write to Plane, write new keys
+//   dart run tool/plane_sync.dart apply --no-create  # where HEAD holds the remote default branch: keyed lines only (the git hook)
 //   dart run tool/plane_sync.dart setup              # create missing cycles, modules, labels
 //
 // The project lives in `plane-sync.json`; the token is `PLANE_API_KEY=...` in
@@ -55,7 +55,8 @@ class Config {
   final String identifier;
   final String repoUrl;
 
-  /// The only branch `apply` runs on.
+  /// The only branch a creating `apply` runs on; every `apply` needs a HEAD
+  /// holding all of it on `origin`.
   final String defaultBranch;
   final List<({String name, String start, String end, String description})> cycles;
   final List<String> modules;
@@ -520,10 +521,25 @@ Future<String> readKey(File file) async {
   throw StateError('$keyFile holds no PLANE_API_KEY');
 }
 
-Future<String> _git(List<String> args) async {
-  final r = await Process.run('git', args);
+Future<String> _git(List<String> args, [String? dir]) async {
+  final r = await Process.run('git', args, workingDirectory: dir);
   if (r.exitCode != 0) throw StateError('git ${args.join(' ')} failed: ${r.stderr}');
   return (r.stdout as String).trim();
+}
+
+/// The main clone of the checkout at [dir]: where `secrets/` lives.
+Future<String> findMainClone([String? dir]) async =>
+    mainCloneOf(await _git(['rev-parse', '--path-format=absolute', '--git-common-dir'], dir));
+
+/// Whether HEAD holds all of `origin/<branch>`. A checkout that does not would
+/// write older states back; any git failure, a missing ref too, answers no.
+Future<bool> holdsRemoteBranch(String branch, [String? dir]) async {
+  final r = await Process.run(
+    'git',
+    ['merge-base', '--is-ancestor', 'origin/$branch', 'HEAD'],
+    workingDirectory: dir,
+  );
+  return r.exitCode == 0;
 }
 
 /// The token sits in the working tree: refuse a repo that could commit it.
@@ -640,8 +656,11 @@ class Context {
   }
 }
 
-/// `check` when [apply] is false. `apply` runs on the default branch only: a
-/// branch must not mint keys or push its own idea of the ROADMAP to Plane.
+/// `check` when [apply] is false. Every `apply` needs a HEAD that holds all of
+/// the remote default branch ([holdsDefault]): a checkout behind it, the main
+/// clone too, must not write older states back. A creating `apply` also runs on
+/// the default branch only: a branch must not mint keys, while a tick may be
+/// committed on a detached HEAD.
 Future<int> runSync({
   required Config config,
   required PlaneClient api,
@@ -649,13 +668,17 @@ Future<int> runSync({
   required File cache,
   required String sha,
   required String branch,
+  required bool holdsDefault,
   required bool apply,
   required bool noCreate,
   required DateTime now,
   required StringSink out,
 }) async {
-  if (apply && branch != config.defaultBranch) {
-    throw StateError('refusing: apply runs on ${config.defaultBranch}, this is $branch');
+  if (apply && !holdsDefault) {
+    throw StateError('refusing: this checkout ($branch) does not hold all of origin/${config.defaultBranch}');
+  }
+  if (apply && !noCreate && branch != config.defaultBranch) {
+    throw StateError('refusing: a creating apply runs on ${config.defaultBranch}, this is $branch');
   }
   final id = config.identifier;
   final text = roadmap.readAsStringSync();
@@ -859,9 +882,7 @@ Future<int> runSetup({
 Future<int> _run(List<String> args) async {
   final cmd = parseCommand(args);
   final config = Config.parse(File(configFile).readAsStringSync());
-  final main = mainCloneOf(
-    await _git(['rev-parse', '--path-format=absolute', '--git-common-dir']),
-  );
+  final main = await findMainClone();
   await requireIgnored(main);
   final api = PlaneApi(await readKey(File('$main/$keyFile')), base: config.projectUrl);
   try {
@@ -873,6 +894,7 @@ Future<int> _run(List<String> args) async {
       cache: File('$main/$cacheFile'),
       sha: await _git(['rev-parse', 'HEAD']),
       branch: await _git(['rev-parse', '--abbrev-ref', 'HEAD']),
+      holdsDefault: await holdsRemoteBranch(config.defaultBranch),
       apply: cmd.command == 'apply',
       noCreate: cmd.noCreate,
       now: DateTime.now(),

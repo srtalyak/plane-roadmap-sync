@@ -15,7 +15,8 @@ You need the [Dart SDK](https://dart.dev/get-dart) 3.0 or later and a Plane proj
 3. Add `secrets/` to `.gitignore`. The tool refuses to run until you have.
 4. Create a personal API token in Plane (settings -> profile -> API tokens) and write `PLANE_API_KEY=<token>` into `secrets/plane.env`.
 5. Write your `ROADMAP.md` in the shape below, or turn the existing one into it.
-6. Run these in order:
+6. Push the default branch to `origin`: every `apply` compares HEAD with it, and a repo with no such ref is refused.
+7. Run these in order:
 
 ```bash
 dart run tool/plane_sync.dart setup    # creates the cycles, modules and labels
@@ -35,7 +36,7 @@ git config core.hooksPath tool/git-hooks
 | `workspace` | The workspace slug from the URL |
 | `projectId`, `identifier` | The project's id and identifier. The guard refuses any other project |
 | `repoUrl` | The repo's web URL; descriptions link to the line at the commit |
-| `defaultBranch` | The only branch `apply` runs on; `main` when left out |
+| `defaultBranch` | The only branch a creating `apply` runs on, and the one every `apply` compares HEAD with on `origin`; `main` when left out |
 | `cycles` | One per phase, named `Phase 0`, `Phase 1` ...: `name`, `start`, `end`, `description` |
 | `modules` | The module names `setup` creates |
 | `labels` | Name to colour; must hold `gate` |
@@ -84,17 +85,21 @@ To convert a plan written as headings: one top-level line per work item, the old
 
 ```bash
 dart run tool/plane_sync.dart check              # exit 0 in sync, 1 out of sync, 2 on a failure
-dart run tool/plane_sync.dart apply              # default branch: writes, and mints items for new lines
-dart run tool/plane_sync.dart apply --no-create  # default branch: keyed lines only
+dart run tool/plane_sync.dart apply              # up-to-date default branch: writes, and mints items for new lines
+dart run tool/plane_sync.dart apply --no-create  # where HEAD holds the remote default branch: keyed lines only
 dart run tool/plane_sync.dart setup              # creates what is missing; changes nothing that exists
 ```
 
 The hook runs `apply --no-create` after a commit that touched `ROADMAP.md`; output goes to `secrets/plane-sync.log`, and it never blocks a commit. A new line becomes an item only through a deliberate `apply`, followed by a commit of its key.
 
-- `check` and `setup` run from any checkout; `apply` refuses any branch but the default one.
+- `check` and `setup` run from any checkout. Every `apply` refuses a HEAD that does not hold all of `origin/<defaultBranch>`, the main clone's too: it would write older states back. A creating `apply` also refuses any branch but the default one: a branch must not mint keys. `apply --no-create` runs in any other checkout, a detached worktree too.
 - Calls are paced at 1.1 s (Plane allows 60 a minute), with a 30 s timeout, so a run starts with about 12 s of reads and the first `apply` takes a few minutes.
-- The hook always mirrors **the main clone's** `ROADMAP.md`, where the token lives. Keep that clone on the default branch and pulled: a commit made in a worktree and pushed reaches Plane only after a `git pull` there and an `apply --no-create`.
-- A worktree has no `secrets/`: the tool finds the main clone through the common git dir, so the token is never copied.
+- The hook mirrors **the committing checkout's** `ROADMAP.md` and HEAD, a worktree's too. A worktree has no `secrets/`: the token, cache and log are read in place in the main clone, through the common git dir, and never copied.
+- A tick from a worktree reaches Plane by itself: `git fetch origin`, `git checkout --detach origin/<defaultBranch>`, tick, commit, push.
+- A checkout behind the remote default branch, the main clone included, is refused, in the log and never in the commit. Fetch and start from it, or pull on the main clone. The hook does not fetch, so it judges by the last fetch, which all worktrees share.
+- The mirror runs at the commit, before the push. If the push is rejected, Plane is ahead of the branch until the next run.
+- A branch cut from the current default branch passes too: a `ROADMAP.md` edit there reaches Plane's description before the merge, with a permalink to the branch's commit. Tick a box only after its merge and states stay right.
+- With an absolute `core.hooksPath` the hook that runs is the file it names, so a new hook goes live when that checkout has it; with the relative path above each checkout runs its own.
 - By hand, use an SDK at least as new as your project's: with a `.dart_tool/` in the checkout, an older `dart` refuses the package's language version. The hook does not care: it runs the tool on an empty package config.
 
 ## Rotating the token
@@ -114,6 +119,7 @@ The hook runs `apply --no-create` after a commit that touched `ROADMAP.md`; outp
 | `the line changed during the run: add DEMO-n by hand` | The line was edited while `apply` ran | Append `<!-- DEMO-n -->` to the line, commit |
 | A live box shows Cancelled | A cancel word is on the line, in a note about part of it too | Reword the note, or nest it under the line |
 | `Plane items with no keyed line` | Items the ROADMAP does not name | Left alone. Key the line by hand, or delete the item in Plane |
+| `refusing: this checkout ... does not hold all of origin/...` | The commit was made behind the remote default branch, or the ref is missing | Nothing reached Plane. Fetch, redo the tick on it |
 | `missing in Plane: ...; run setup first` | A cycle, module, label or state is gone | `setup`, then again |
 | `refusing: the project is not ...` | `plane-sync.json` and Plane disagree | Fix the config; never remove the guard |
 | `401` | The token is wrong or revoked | Rotate it |
