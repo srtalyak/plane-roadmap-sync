@@ -78,7 +78,11 @@ class FakePlane extends PlaneClient {
       onCreate?.call();
       return row;
     }
-    if (clean.endsWith('/cycle-issues/')) {
+    if (method == 'PATCH' && clean.startsWith('/issues/')) {
+      final row = issues.firstWhere((r) => clean == '/issues/${r['id']}/');
+      if (map.containsKey('name')) row['name'] = map['name'];
+      if (map.containsKey('state')) row['state'] = map['state'];
+    } else if (clean.endsWith('/cycle-issues/')) {
       final cycle = clean.split('/')[2];
       for (final issue in map['issues'] as List) {
         cycleOf[issue as String] = cycle;
@@ -306,6 +310,114 @@ void main() {
 
     test('lowercase skipped in prose is not a cancel word', () {
       expect(desiredState(box('- [ ] **P1-01 A** - skipped frames are counted')), 'Todo');
+    });
+  });
+
+  group('the Team line', () {
+    const tr = 'Çöp kutuları sokağa iniyor';
+    const sentences = 'Kutular ekranın üstünden akar; İlk ışık öğle güneşi.';
+    List<RoadmapBox> parse(String s) => parseRoadmap(demo, '## Phase 1\n$s');
+
+    test('is the title and sentences of the box above it, split at the first |', () {
+      final b = parse('- [ ] **P1-02 LANE** - bins (3 days) <!-- DEMO-12 -->\n'
+              '  - **Team:** $tr | $sentences\n')
+          .single;
+      expect(b.team!.title, tr);
+      expect(b.team!.sentences, sentences);
+      expect(b.team!.lineIndex, 2);
+      expect(b.displayTitle, tr);
+      expect(b.title, 'P1-02 LANE - bins', reason: 'the technical title is untouched');
+      expect(b.body, isNot(contains('Team')));
+    });
+
+    test('a box without one keeps its derived title', () {
+      final b = parse('- [ ] **P1-02 LANE** - bins (3 days)\n  - **Goal:** x\n').single;
+      expect(b.team, isNull);
+      expect(b.teamLines, isEmpty);
+      expect(b.displayTitle, 'P1-02 LANE - bins');
+    });
+
+    test('is found after other nested lines and after a blank line inside the block', () {
+      final b = parse('- [ ] **P1-02 LANE** - bins\n  - **Goal:** x\n  - [ ] y\n\n  - **Team:** a | b\n').single;
+      expect(b.team!.title, 'a');
+    });
+
+    test('never comes from the next box, a heading or an unindented line', () {
+      final bs = parse('- [ ] **P1-02 LANE** - a\n- [ ] **P1-03 WAVES** - b\n  - **Team:** t | s\n');
+      expect(bs[0].team, isNull);
+      expect(bs[1].team!.title, 't');
+      expect(parse('- [ ] **P1-02 LANE** - a\nText\n  - **Team:** t | s\n').single.team, isNull);
+      expect(parse('- [ ] **P1-02 LANE** - a\n## Phase 2\n  - **Team:** t | s\n').single.team, isNull);
+      expect(parse('- [ ] **P1-02 LANE** - a\n- **Team:** t | s\n').single.team, isNull,
+          reason: 'a Team line is nested');
+    });
+
+    test('no | is a title only; a hyphen never splits; a second | stays in the sentences', () {
+      final only = parse('- [ ] **P1-02 LANE**\n  - **Team:** e-posta ile - giriş yok\n').single.team!;
+      expect(only.title, 'e-posta ile - giriş yok');
+      expect(only.sentences, '');
+      final two = parse('- [ ] **P1-02 LANE**\n  - **Team:**   a  |  b | c  \n').single.team!;
+      expect(two.title, 'a');
+      expect(two.sentences, 'b | c');
+    });
+
+    test('markdown is stripped and a long title is cut at 120 on a word boundary', () {
+      final t = parse('- [ ] **P1-02 LANE**\n  - **Team:** **kalın** `kod` | *vurgu* metin\n').single.team!;
+      expect(t.title, 'kalın kod');
+      expect(t.sentences, 'vurgu metin');
+      final long = List.filled(40, 'kelime').join(' ');
+      final cut = parse('- [ ] **P1-02 LANE**\n  - **Team:** $long\n').single.team!.title;
+      expect(cut.length, lessThanOrEqualTo(123));
+      expect(cut, endsWith('kelime...'));
+    });
+
+    test('a CRLF file reads the same', () {
+      final lf = parse('- [ ] **P1-02 LANE**\n  - **Team:** $tr | $sentences\n').single.team!;
+      final crlf = parse('- [ ] **P1-02 LANE**\r\n  - **Team:** $tr | $sentences\r\n').single.team!;
+      expect(crlf.title, lf.title);
+      expect(crlf.sentences, lf.sentences);
+      expect(crlf.raw, lf.raw);
+    });
+
+    test('its words never reach the cancel rule', () {
+      for (final word in ['SKIPPED', 'withdrawn', 'superseded']) {
+        final b = parse('- [ ] **P1-02 LANE** - bins\n  - **Team:** $word | $word\n').single;
+        expect(desiredState(b), 'Todo', reason: word);
+      }
+    });
+
+    test('two Team lines or an empty one is a problem, never a guess', () {
+      final two = parse('- [ ] **P1-02 LANE**\n  - **Team:** a\n  - **Team:** b\n').single;
+      expect(two.team, isNull);
+      expect(two.teamProblem, contains('2 Team lines (L3, L4)'));
+      for (final empty in ['', '   ', ' | sentences only']) {
+        final b = parse('- [ ] **P1-02 LANE**\n  - **Team:**$empty\n').single;
+        expect(b.team, isNull, reason: empty);
+        expect(b.teamProblem, contains('no title'), reason: empty);
+      }
+      expect(parse('- [ ] **P1-02 LANE**\n').single.teamProblem, isNull);
+    });
+
+    test('the description: the sentences, then the box id and the permalink; HTML escaped', () {
+      final b = parse('- [ ] **P1-02 LANE** - bins\n  - **Team:** $tr | a < b & $sentences\n').single;
+      final html = descriptionHtml(demo, b, 'abcdef0123456789');
+      final link = '${demo.repoUrl}/blob/abcdef0123456789/ROADMAP.md?plain=1#L2';
+      expect(html, '<p>a &lt; b &amp; $sentences</p><p>P1-02 - ROADMAP.md L2 at abcdef01: <a href="$link">$link</a></p>');
+      expect(html, isNot(contains('bins')), reason: 'the technical text stays in the repository');
+      final titleOnly = descriptionHtml(demo, parse('- [ ] **P1-02 LANE**\n  - **Team:** t\n').single, 'abcdef0123456789');
+      expect(titleOnly, startsWith('<p>P1-02 - ROADMAP.md L2'));
+      final noId = descriptionHtml(demo, parse('- [ ] **Week 0:** x\n  - **Team:** t | s\n').single, 'abcdef0123456789');
+      expect(noId, startsWith('<p>s</p><p>ROADMAP.md L2'));
+    });
+
+    test('the cache text: the body alone without a Team line, the Team text with one', () {
+      final plain = parse('- [ ] **P1-02 LANE** - bins\n').single;
+      expect(syncedText(plain), plain.body);
+      expect(hadTeam(syncedText(plain)), isFalse);
+      final team = parse('- [ ] **P1-02 LANE** - bins\n  - **Team:** $tr | $sentences\n').single;
+      expect(syncedText(team), '${team.body}\n**Team:** $tr | $sentences');
+      expect(hadTeam(syncedText(team)), isTrue);
+      expect(hadTeam(null), isFalse);
     });
   });
 
@@ -748,6 +860,132 @@ void main() {
       expect(plane.writes.where((w) => w.contains('cycle-issues')), ['POST /cycles/cycle-0/cycle-issues/']);
       expect(plane.labels, contains('cyc:Phase 1'));
     });
+
+    group('with a Team line', () {
+      const boxLine = '- [ ] **P0-K Board for the team** - the board reads a soft title <!-- DEMO-59 -->';
+      const body = '**P0-K Board for the team** - the board reads a soft title';
+      const derived = 'P0-K Board for the team - the board reads a soft title';
+      const title = 'Pano ekip için okunur oluyor';
+      const sentences = "Her iş kutusunun altındaki kısa satır Plane'de başlık ve açıklama olur.";
+      const team = '## Phase 0\n$boxLine\n  - **Team:** $title | $sentences\n';
+      const plain = '## Phase 0\n$boxLine\n';
+
+      FakePlane plane59({String name = derived}) {
+        final plane = FakePlane(issues: [
+          {'id': 'i59', 'sequence_id': 59, 'name': name, 'state': 'state-Todo'},
+        ]);
+        plane.cycleOf['i59'] = 'cycle-0';
+        return plane;
+      }
+
+      /// The state before Team lines: the tool remembers the plain body.
+      void cachedPlain() => cache.writeAsStringSync(jsonEncode({'DEMO-59': body}));
+
+      test('check reports the title and the description, writes nothing, exits 1', () async {
+        final plane = plane59();
+        cachedPlain();
+        expect(await run(plane, team), 1);
+        expect(plane.writes, isEmpty);
+        expect(out.toString(), contains('~ DEMO-59 title "$derived" -> "$title"'));
+        expect(out.toString(), contains('~ DEMO-59 description'));
+        expect(out.toString(), contains('pending: 1 change(s), 0 failure(s)'));
+      });
+
+      test('apply sends one PATCH with the title and the description; then nothing is pending', () async {
+        final plane = plane59();
+        cachedPlain();
+        expect(await run(plane, team, apply: true), 0);
+        expect(plane.writes, ['PATCH /issues/i59/']);
+        final patch = plane.bodies['PATCH /issues/i59/']!.single as Map;
+        expect(patch.keys, unorderedEquals(['name', 'description_html']));
+        expect(patch['name'], title);
+        expect(patch['description_html'], startsWith('<p>$sentences</p><p>P0-K - ROADMAP.md L2 at abcdef01: '));
+        expect(plane.issues.single['name'], title);
+        out.clear();
+        expect(await run(plane, team), 0);
+        expect(out.toString(), contains('pending: 0 change(s), 0 failure(s)'));
+        expect(await run(plane, team, apply: true), 0);
+        expect(plane.writes, hasLength(1));
+      });
+
+      test('a title renamed by hand in Plane is reported and put back', () async {
+        final plane = plane59(name: 'A hand title');
+        cache.writeAsStringSync(jsonEncode({'DEMO-59': '$body\n**Team:** $title | $sentences'}));
+        expect(await run(plane, team), 1);
+        expect(out.toString(), contains('~ DEMO-59 title "A hand title" -> "$title"'));
+        expect(await run(plane, team, apply: true), 0);
+        expect((plane.bodies['PATCH /issues/i59/']!.single as Map).keys, ['name']);
+      });
+
+      test('a change to the Team sentences re-sends the description only', () async {
+        final plane = plane59(name: title);
+        cache.writeAsStringSync(jsonEncode({'DEMO-59': '$body\n**Team:** $title | $sentences'}));
+        expect(await run(plane, '## Phase 0\n$boxLine\n  - **Team:** $title | Yeni cümle.\n', apply: true), 0);
+        final patch = plane.bodies['PATCH /issues/i59/']!.single as Map;
+        expect(patch.keys, ['description_html']);
+        expect(patch['description_html'], startsWith('<p>Yeni cümle.</p>'));
+      });
+
+      test('a removed Team line puts the derived title and the plain description back, once', () async {
+        final plane = plane59(name: title);
+        cache.writeAsStringSync(jsonEncode({'DEMO-59': '$body\n**Team:** $title | $sentences'}));
+        expect(await run(plane, plain), 1);
+        expect(out.toString(), contains('~ DEMO-59 title "$title" -> "$derived"'));
+        expect(await run(plane, plain, apply: true), 0);
+        final patch = plane.bodies['PATCH /issues/i59/']!.single as Map;
+        expect(patch['name'], derived);
+        expect(patch['description_html'], startsWith('<p>$derived</p>'));
+        plane.issues.single['name'] = 'Renamed later by hand';
+        expect(await run(plane, plain, apply: true), 0);
+        expect(plane.writes, hasLength(1), reason: 'a plain line owns no title again');
+      });
+
+      test('no backfill: a plain keyed line is never retitled, and one Team line patches its item only', () async {
+        final plane = FakePlane(issues: [
+          {'id': 'i7', 'sequence_id': 7, 'name': 'A hand title', 'state': 'state-Todo'},
+          {'id': 'i59', 'sequence_id': 59, 'name': derived, 'state': 'state-Todo'},
+        ]);
+        plane.cycleOf['i7'] = 'cycle-0';
+        plane.cycleOf['i59'] = 'cycle-0';
+        const other = '- [ ] **P0-J Hook from worktrees** - the hook <!-- DEMO-7 -->';
+        cache.writeAsStringSync(jsonEncode({
+          'DEMO-7': '**P0-J Hook from worktrees** - the hook',
+          'DEMO-59': body,
+        }));
+        expect(await run(plane, '## Phase 0\n$other\n$boxLine\n'), 0, reason: 'before any Team line: in sync');
+        expect(await run(plane, '## Phase 0\n$other\n$boxLine\n  - **Team:** $title | $sentences\n', apply: true), 0);
+        expect(plane.writes, ['PATCH /issues/i59/']);
+      });
+
+      test('a new line is born with its Team title and description', () async {
+        final plane = FakePlane();
+        expect(await run(plane, '## Phase 0\n- [ ] **P0-K Board for the team** - x\n  - **Team:** $title | $sentences\n'),
+            1);
+        expect(out.toString(), contains('[Todo] Phase 0 / Ops  $title'));
+        expect(await run(plane, roadmap.readAsStringSync(), apply: true), 0);
+        final post = plane.bodies['POST /issues/']!.single as Map;
+        expect(post['name'], title);
+        expect(post['description_html'], startsWith('<p>$sentences</p><p>P0-K - '));
+        out.clear();
+        expect(await run(plane, roadmap.readAsStringSync()), 0, reason: 'what it was born with is remembered');
+      });
+
+      test('two Team lines fail the box, exit 2, and nothing of it is written', () async {
+        final plane = plane59();
+        cachedPlain();
+        final twice = '$team  - **Team:** another | one\n';
+        expect(await run(plane, twice), 2);
+        expect(await run(plane, twice, apply: true), 2);
+        expect(plane.writes, isEmpty);
+        expect(out.toString(), contains('! L2 has 2 Team lines (L3, L4); keep one'));
+        const unkeyed = '## Phase 0\n- [ ] **P0-K Board** - new\n  - **Team:**  \n';
+        expect(await run(plane, unkeyed, apply: true), 2);
+        expect(plane.writes, isEmpty, reason: 'an empty Team line creates nothing');
+        expect(await run(plane, unkeyed, apply: true, noCreate: true), 0,
+            reason: 'the hook skips an unkeyed line, so its Team line is not the hook\'s failure');
+        expect(await run(plane, unkeyed), 2, reason: 'check still reports it');
+      });
+    });
   });
 
   group('setup', () {
@@ -793,20 +1031,23 @@ void main() {
     late HttpServer server;
     final seen = <DateTime>[];
     final keys = <String?>[];
+    final received = <String>[];
     late List<(int, String, Map<String, String>)> replies;
 
     setUp(() async {
       seen.clear();
       keys.clear();
+      received.clear();
       server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       server.listen((req) async {
         seen.add(DateTime.now());
         keys.add(req.headers.value('X-API-Key'));
+        received.add(await utf8.decodeStream(req));
         final (status, body, headers) = replies.removeAt(0);
         if (status == 0) return; // Accepts and never answers.
         req.response.statusCode = status;
         headers.forEach(req.response.headers.set);
-        req.response.write(body);
+        req.response.add(utf8.encode(body));
         await req.response.close();
       });
     });
@@ -814,6 +1055,15 @@ void main() {
 
     PlaneApi api({Duration pace = Duration.zero}) =>
         PlaneApi('the-token-value', base: 'http://127.0.0.1:${server.port}', pace: pace);
+
+    test('non-ASCII text goes out as UTF-8 and comes back whole', () async {
+      const name = 'Çöp kutuları ğüşıöç İĞÜŞÖÇ ãõñ';
+      replies = [(200, jsonEncode({'name': name}), {})];
+      final client = api();
+      expect(await client.patch('/issues/x/', {'name': name}), {'name': name});
+      expect(received.single, jsonEncode({'name': name}));
+      client.close();
+    });
 
     test('a 429 retries after Retry-After', () async {
       replies = [
@@ -899,6 +1149,16 @@ void main() {
     test('every line has a module', () {
       for (final b in boxes) {
         expect(demo.modules, contains(defaultModule(demo, b.id, b.phase)), reason: b.title);
+      }
+    });
+
+    test('its Team line sits under a box, holds a title and is never cut', () {
+      final withTeam = boxes.where((b) => b.teamLines.isNotEmpty).toList();
+      expect(withTeam.map((b) => b.id), ['P1-01']);
+      for (final b in withTeam) {
+        expect(b.teamProblem, isNull, reason: b.title);
+        expect(b.team!.title.length, lessThanOrEqualTo(120), reason: b.title);
+        expect(b.team!.title, isNot(endsWith('...')), reason: b.title);
       }
     });
 

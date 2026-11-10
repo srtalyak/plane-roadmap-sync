@@ -66,6 +66,19 @@ An unknown key is refused, so a typo cannot quietly mean a default. A phase with
 
 **The title** is `P1-01 NAME - gloss`: the first clause after the name, without a leading or trailing parenthetical, so `(3 days)` and `(session: ...)` stay out of Plane. A line with no bold name is cut at 120 characters.
 
+**The Team line** (optional) gives the people who follow the board a plain title and description, in their own language, while the technical line stays in the repository:
+
+```markdown
+- [ ] **P1-01 LOGIN** - the sign-in form and the session (3-4 days)
+  - **Team:** Sign-in is coming | People sign in with an e-mail link and stay signed in on their phone.
+```
+
+- `- **Team:**` indented under the box line, anywhere in its nested block (up to the next line that is neither blank nor indented). Before the first `|`: the title; after it: one or two sentences. No `|` = a title only; a hyphen never splits.
+- In Plane the title is the Team title (markdown stripped, cut at 120 characters) and the description is the sentences, then `P1-01 - ROADMAP.md L.. at <sha>: <permalink>`, so the box id stays findable.
+- Any language or script passes through as is. A cancel word on a Team line never cancels the box: only the box line is read for it.
+- A box without one keeps its derived title and plain description, and its item is never touched for it: adding Team lines to a running board rewrites only the items that get one. The first `ROADMAP.md` commit after a Team line is added (the hook) writes it.
+- Removing a Team line puts the derived title and the plain description back on the next run, once, while the cache remembers the Team text.
+
 To convert a plan written as headings: one top-level line per work item, the old bullets nested beneath it, a `## Phase N` heading per phase. Keep the items coarse: a box is a piece of work, its checklist stays in the file.
 
 ## What the tool owns
@@ -74,12 +87,14 @@ To convert a plan written as headings: one top-level line per work item, the old
 |---|---|---|
 | State | every run | Ticked = Done; `SKIPPED`, `withdrawn` or `superseded` on the line = Cancelled; else Todo |
 | Cycle | every run | The phase's cycle; an open item of a closed phase rolls into the current cycle; a closed one stays out and carries `cyc:<phase>` |
-| Description | when the line changed | The plain line and a permalink to it at HEAD |
-| Title | creation only | As above |
+| Description | when the line or its Team line changed | The plain line and a permalink to it at HEAD; with a Team line, the Team sentences, the box id and the permalink |
+| Title | creation only; every run with a Team line | As above; with a Team line, the Team title, compared with Plane's own on every run |
 | Module | creation only | `boxModules`, then `phaseModules` |
 | Labels | creation only | `gate`, `cyc:<phase>` |
 
-**Do not edit state, cycle or description in Plane:** the next run overwrites them. A hand edit of title, module or labels survives. There is no In Progress: the board shows what is finished.
+`check` reports a title drift as `~ DEMO-n title "old" -> "new"` and a description drift as `~ DEMO-n description`, as it reports a state drift; `apply --no-create` fixes all three in one call. A description drift is read from the cache (what the tool last sent); a title and a state from Plane itself.
+
+**Do not edit state, cycle or description in Plane, nor the title of an item with a Team line:** the next run overwrites them. A hand edit of any other title, module or labels survives. There is no In Progress: the board shows what is finished.
 
 ## Daily use
 
@@ -117,6 +132,9 @@ The hook runs `apply --no-create` after a commit that touched `ROADMAP.md`; outp
 | A failure after `created DEMO-n` | The item exists and is keyed; its module or cycle post failed | Commit the key. The cycle heals on the next run; set a missed module in Plane by hand |
 | A failure on a create (`! L<n>:`), with no `created` line | The item may exist all the same, if the answer was lost | Look in Plane before the next `apply`, or it mints a twin. If it exists, key the line by hand |
 | `the line changed during the run: add DEMO-n by hand` | The line was edited while `apply` ran | Append `<!-- DEMO-n -->` to the line, commit |
+| `L<n> has 2 Team lines (...); keep one` | A box carries two Team lines | Nothing of that box was written, its state neither. Delete one, commit |
+| `L<n>: the Team line has no title` | `**Team:**` with nothing before its `\|` | Nothing of that box was written. Write the title, commit |
+| A Team title edited in Plane came back | The tool owns it | Edit the Team line instead |
 | A live box shows Cancelled | A cancel word is on the line, in a note about part of it too | Reword the note, or nest it under the line |
 | `Plane items with no keyed line` | Items the ROADMAP does not name | Left alone. Key the line by hand, or delete the item in Plane |
 | `refusing: this checkout ... does not hold all of origin/...` | The commit was made behind the remote default branch, or the ref is missing | Nothing reached Plane. Fetch, redo the tick on it |

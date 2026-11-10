@@ -5,7 +5,13 @@
 // item, linked by an invisible key at the end of the line: `<!-- DEMO-12 -->`.
 // The tool owns an item's state, its cycle and its description; it sets the
 // title, the module and the labels when it creates the item and never touches
-// them again. It deletes nothing, ever.
+// them again, except the title of a line that carries a Team line (below). It
+// deletes nothing, ever.
+//
+// A box may carry one nested `- **Team:** title | one or two sentences` line,
+// written for the people who follow the board, in their language: it becomes
+// the item's title and its description, and the tool keeps both in step on
+// every run.
 //
 //   dart run tool/plane_sync.dart check              # dry run (exit 1 if out of sync)
 //   dart run tool/plane_sync.dart apply              # up-to-date default branch: write to Plane, write new keys
@@ -128,6 +134,34 @@ class Config {
 // ---------------------------------------------------------------------------
 // The ROADMAP side (pure).
 
+/// A nested `- **Team:** title | sentences` line: the item's title and
+/// description for the people who follow the board. Language-blind: any script
+/// passes through as is.
+class TeamLine {
+  factory TeamLine(int lineIndex, String text) {
+    final (title, sentences) = _teamSplit(text);
+    return TeamLine._(lineIndex, text.trim(), _cut(_plain(title), 120), _plain(sentences));
+  }
+
+  TeamLine._(this.lineIndex, this.raw, this.title, this.sentences);
+
+  /// 0-based index of the Team line itself.
+  final int lineIndex;
+
+  /// Everything after `**Team:**`, trimmed: what the cache remembers.
+  final String raw;
+  final String title;
+
+  /// Empty when the line has no `|`.
+  final String sentences;
+}
+
+/// Split at the first `|`; a hyphen never splits.
+(String, String) _teamSplit(String text) {
+  final at = text.indexOf('|');
+  return at < 0 ? (text, '') : (text.substring(0, at), text.substring(at + 1));
+}
+
 class RoadmapBox {
   RoadmapBox({
     required this.lineIndex,
@@ -135,7 +169,8 @@ class RoadmapBox {
     required this.body,
     required this.phase,
     required this.key,
-  });
+    List<TeamLine>? teamLines,
+  }) : teamLines = teamLines ?? [];
 
   /// 0-based index into the file's `\n`-separated lines.
   final int lineIndex;
@@ -149,6 +184,28 @@ class RoadmapBox {
 
   /// The Plane sequence id, when the line carries a key.
   final int? key;
+
+  /// Every `**Team:**` line in the box's nested block; one at most is valid.
+  /// Kept apart from [body], so its words never reach [cancelled].
+  final List<TeamLine> teamLines;
+
+  /// The one valid Team line, else null.
+  TeamLine? get team => teamProblem == null && teamLines.length == 1 ? teamLines.single : null;
+
+  /// Two Team lines, or one with no title: the box is not written until fixed.
+  String? get teamProblem {
+    if (teamLines.length > 1) {
+      return 'L${lineIndex + 1} has ${teamLines.length} Team lines '
+          '(L${teamLines.map((t) => t.lineIndex + 1).join(', L')}); keep one';
+    }
+    if (teamLines.length == 1 && teamLines.single.title.isEmpty) {
+      return 'L${teamLines.single.lineIndex + 1}: the Team line has no title';
+    }
+    return null;
+  }
+
+  /// What Plane's title should be: the Team title, else the derived one.
+  String get displayTitle => team?.title ?? title;
 
   /// `**NAME**` at the start of the line without a trailing colon, else null.
   String? get name {
@@ -176,21 +233,31 @@ final cancelledPattern = RegExp(r'\bSKIPPED\b|\b[Ww]ithdrawn\b|\b[Ss]uperseded\b
 final _namePattern = RegExp(r'^\*\*([^*]+)\*\*');
 final _idPattern = RegExp(r'^(?:(P\d-[A-Z0-9]+)|Gate (G\d))\b');
 final _boxPattern = RegExp(r'^- \[( |x|X)\] (.*)$');
+final _teamPattern = RegExp(r'^\s+- \*\*Team:\*\*(.*)$');
 final _phasePattern = RegExp(r'^## Phase (\d)\b');
 
 String _cleanName(String s) => s.trim().replaceFirst(RegExp(r':$'), '').trimRight();
 
 /// Items live under `## Phase N` only: other sections hold rituals. Lines are
 /// split as the writer splits them, so an index means the same line on both
-/// sides, in an LF or a CRLF file.
+/// sides, in an LF or a CRLF file. A box's nested block runs to the next line
+/// that is neither blank nor indented.
 List<RoadmapBox> parseRoadmap(Config config, String text) {
   final keyPattern = RegExp('\\s*<!--\\s*${config.identifier}-(\\d+)\\s*-->\\s*\$');
   final boxes = <RoadmapBox>[];
   String? phase;
+  RoadmapBox? open;
   final lines = text.split('\n');
   for (var i = 0; i < lines.length; i++) {
     final raw = lines[i];
     final line = raw.endsWith('\r') ? raw.substring(0, raw.length - 1) : raw;
+    if (line.isNotEmpty && !line.startsWith(RegExp(r'\s'))) {
+      open = null;
+    } else {
+      final t = open == null ? null : _teamPattern.firstMatch(line);
+      if (t != null) open!.teamLines.add(TeamLine(i, t.group(1)!));
+      continue;
+    }
     if (line.startsWith('## ')) {
       final m = _phasePattern.firstMatch(line);
       phase = m == null ? null : 'Phase ${m.group(1)}';
@@ -206,16 +273,30 @@ List<RoadmapBox> parseRoadmap(Config config, String text) {
       key = int.parse(k.group(1)!);
       body = body.substring(0, k.start).trimRight();
     }
-    boxes.add(RoadmapBox(
+    open = RoadmapBox(
       lineIndex: i,
       checked: m.group(1) != ' ',
       body: body,
       phase: phase,
       key: key,
-    ));
+    );
+    boxes.add(open);
   }
   return boxes;
 }
+
+const _teamMark = '\n**Team:** ';
+
+/// What the cache remembers of a line: its body, plus its Team text when it
+/// has one. A box without a Team line remembers exactly its body, so adding the
+/// feature rewrites no plain item.
+String syncedText(RoadmapBox box) {
+  final team = box.team;
+  return team == null ? box.body : '${box.body}$_teamMark${team.raw}';
+}
+
+/// Whether the cache shows the tool wrote a Team title for this item.
+bool hadTeam(String? remembered) => remembered?.contains(_teamMark) ?? false;
 
 /// Appends the key to a line, before its `\r` if the file is CRLF.
 String lineWithKey(Config config, String line, int key) {
@@ -389,11 +470,17 @@ String _escape(String s) => s
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;');
 
+/// The plain line and a permalink; with a Team line, the Team sentences and
+/// the permalink led by the box id, so the id stays findable.
 String descriptionHtml(Config config, RoadmapBox box, String sha) {
   final link = '${config.repoUrl}/blob/$sha/$roadmapPath?plain=1#L${box.lineIndex + 1}';
-  return '<p>${_escape(_plain(box.body))}</p>'
-      '<p>ROADMAP.md L${box.lineIndex + 1} at ${sha.substring(0, 8)}: '
-      '<a href="$link">$link</a></p>';
+  final footer = 'ROADMAP.md L${box.lineIndex + 1} at ${sha.substring(0, 8)}: '
+      '<a href="$link">$link</a>';
+  final team = box.team;
+  if (team == null) return '<p>${_escape(_plain(box.body))}</p><p>$footer</p>';
+  final id = box.id;
+  return '${team.sentences.isEmpty ? '' : '<p>${_escape(team.sentences)}</p>'}'
+      '<p>${id == null ? '' : '$id - '}$footer</p>';
 }
 
 /// The common git dir's parent: where `secrets/` lives, whatever the worktree.
@@ -711,6 +798,14 @@ Future<int> runSync({
         currentCycleId: ctx.currentCycleId,
       );
       final desc = descriptionHtml(config, box, sha);
+      // An unkeyed line the hook skips anyway is not its failure; check and a
+      // creating apply still report it.
+      final problem = box.key == null && apply && noCreate ? null : box.teamProblem;
+      if (problem != null) {
+        out.writeln('! $problem');
+        failures++;
+        continue;
+      }
 
       if (box.key != null) {
         final name = '$id-${box.key}';
@@ -730,7 +825,16 @@ Future<int> runSync({
           patch['state'] = ctx.stateId[wantState]!;
           out.writeln('~ $name ${ctx.stateName[it.stateId]} -> $wantState  (${box.title})');
         }
-        if (remembered[name] != box.body) {
+        // A title is compared with Plane's own only where the tool owns it: a
+        // Team line, or one the cache shows was there (its removal restores
+        // the derived title). Plain lines keep their creation title.
+        if (box.team != null || hadTeam(remembered[name])) {
+          if (it.name != box.displayTitle) {
+            patch['name'] = box.displayTitle;
+            out.writeln('~ $name title "${it.name}" -> "${box.displayTitle}"');
+          }
+        }
+        if (remembered[name] != syncedText(box)) {
           patch['description_html'] = desc;
           if (!patch.containsKey('state')) out.writeln('~ $name description  (${box.title})');
         }
@@ -744,7 +848,7 @@ Future<int> runSync({
         try {
           if (patch.isNotEmpty) {
             await api.patch('/issues/${it.id}/', patch);
-            remembered[name] = box.body;
+            remembered[name] = syncedText(box);
           }
           if (moveCycle) {
             await api.post('/cycles/$wantCycle/cycle-issues/', {'issues': [it.id]});
@@ -762,7 +866,7 @@ Future<int> runSync({
       // A closed phase with no cycle to go to: the `cyc:` label carries the history.
       final cycleClosed = phaseClosed && wantCycle == null;
       final cycleText = wantCycle == null ? '${box.phase} (closed)' : ctx.cycleName[wantCycle];
-      out.writeln('+ L${box.lineIndex + 1} [$wantState] $cycleText / ${module ?? '-'}  ${box.title}');
+      out.writeln('+ L${box.lineIndex + 1} [$wantState] $cycleText / ${module ?? '-'}  ${box.displayTitle}');
       if (apply && noCreate) continue;
       changes++;
       if (!apply) continue;
@@ -772,7 +876,7 @@ Future<int> runSync({
             await ctx.ensureLabel(n),
         ];
         final created = await api.post('/issues/', {
-          'name': box.title,
+          'name': box.displayTitle,
           'state': ctx.stateId[wantState],
           'labels': labels,
           'description_html': desc,
@@ -781,7 +885,7 @@ Future<int> runSync({
         final seq = created['sequence_id'] as int;
         // The key first: a failure below must never leave a created item unkeyed.
         newKeys[seq] = lines[box.lineIndex];
-        remembered['$id-$seq'] = box.body;
+        remembered['$id-$seq'] = syncedText(box);
         out.writeln('  created $id-$seq');
         // The module before the cycle: it is set here or never, the cycle heals on the next run.
         if (module != null) {

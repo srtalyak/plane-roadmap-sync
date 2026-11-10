@@ -27,6 +27,7 @@ Target: the first week.
 ## Phase 1 - First playable
 
 - [ ] **P1-01 LOGIN** - the sign-in form and the session (3-4 days)
+  - **Team:** Sign-in is coming | People sign in with an e-mail link and stay signed in on their phone.
   - **Goal:** a nested bullet.
 - [ ] **P1-05 SEARCH + FILTERS (the index on demo data)** (3 days)
 - [ ] **P1-07 DESIGN PASS 1** - the first real screens (3 days + the review rounds)
